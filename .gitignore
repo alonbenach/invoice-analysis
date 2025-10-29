@@ -1,0 +1,12 @@
+*.csv
+*.CSV
+*.xlsx
+*.xls
+*.XLSX
+*.xlsm
+*.ods
+*.parquet
+*.png
+*.jpg
+*.jpeg
+*.gif
