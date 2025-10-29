@@ -1,0 +1,9 @@
+# Analysis day-parts (24h, inclusive start, exclusive end)
+slots:
+  - {id: 1, label: "Going to work",     start: "05:30", end: "09:00"}
+  - {id: 2, label: "Morning groceries", start: "09:00", end: "12:00"}
+  - {id: 3, label: "Lunch time",        start: "12:00", end: "17:00"}
+  - {id: 4, label: "After work",        start: "17:00", end: "23:30"}
+  - {id: 5, label: "Probably outliers", start: "23:30", end: "23:59"}
+  - {id: 5, label: "Probably outliers", start: "00:00", end: "05:30"}
+timezone: "Europe/Warsaw"
