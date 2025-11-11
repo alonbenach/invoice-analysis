@@ -50,6 +50,39 @@ def is_weight_or_pack(text: str) -> bool:
     return bool(re.search(r"\b\d{2,4}\s?(g|kg|ml|l)\b", text) or re.search(r"\bx\s?\d+\b", text))
 
 # ------------------ Rules (allow/deny) ------------------
+FC_CATEGORIES = {
+    "Hot Dog", "Tosty", "Panini", "Frytki/Box", "Zupy",
+    "Makaron", "Pizza", "Pinsa", "Sałatki"
+}
+
+_POS_PATTERNS = [
+    r"\bhot[\s\-]?dog\b",
+    r"\btost\b",
+    r"\bpanini\b",
+    r"\bfrytk",         # frytki / frytek
+    r"\bnugget",        # nuggets
+    r"\bkurczaker\b",   # brand-ish FC box
+    r"\bstrips\b",
+    r"\bfilecik",       # fileciki
+    r"\bkurczaker\b",   # FC box name seen in data
+]
+_NEG_PATTERNS = [
+    r"\bmro(ż|z)on\w*",           # frozen
+    r"\bplastry\b",               # sliced cold cuts
+    r"\bfilet\b.*\b\d{2,3}\s?g\b",
+    r"\blisner\b|\bduda\b",       # packaged meat/salad brands
+    r"\bpedigree\b|\breno\b",     # pet food
+    r"\bduplo\b|\bsnickers\b",    # candy anchors
+    r"\bpies\b|\bps(ów|ow)\b|\bkot\b"
+]
+
+_POS_RE = re.compile("|".join(_POS_PATTERNS), re.IGNORECASE)
+_NEG_RE = re.compile("|".join(_NEG_PATTERNS), re.IGNORECASE)
+
+def _rule_is_fc(product_line_norm: str) -> bool:
+    if not isinstance(product_line_norm, str):
+        return False
+    return bool(_POS_RE.search(product_line_norm)) and not bool(_NEG_RE.search(product_line_norm))
 
 # Positive stems per super-category (Polish stems included)
 POS = {
@@ -98,91 +131,139 @@ def first_hit_category(text: str, cat2pats: dict) -> str | None:
 
 # ------------------ Main API ------------------
 
-def map_fc_products(invoice_df: pd.DataFrame,
-                    canonical_df: pd.DataFrame,
-                    threshold: int = 70) -> pd.DataFrame:
+def map_fc_products(
+    invoice_df: pd.DataFrame,
+    canonical_df: pd.DataFrame,
+    threshold: int = 70,
+    key_col: str = "product_line",
+) -> pd.DataFrame:
     """
-    Map UNIQUE invoice products to FC flag + best canonical item (within super-category).
+    Deterministically + fuzzily map UNIQUE invoice products to Food Corner (FC).
+    - Primary ID is `key_col` (default: product_line).
+    - FC decision: rule-first on product_line, then category-aware fuzzy match.
     Returns columns:
-      ['product_raw','product_norm','product_line','best_match_item','match_category','score','is_food_corner_auto']
+      ['product_raw','product_norm','product_line','best_match_item',
+       'match_category','score','is_food_corner_auto']
     """
-    # Canonical
+
+    # --------- configuration (self-contained) ----------
+    import re
+    from rapidfuzz import fuzz, process
+
+    FC_CATEGORIES = {
+        "Hot Dog", "Tosty", "Panini", "Frytki/Box", "Zupy",
+        "Makaron", "Pizza", "Pinsa", "Sałatki"
+    }
+
+    POS_PATTERNS = [
+        r"\bhot[\s\-]?dog\b",
+        r"\btost(y)?\b|\btoast\b",
+        r"\bpanini\b",
+        r"\bfrytk\w*\b",
+        r"\bnugget\w*\b",
+        r"\bstrips?\b",
+        r"\bfilecik\w*\b",
+        r"\bkurczaker\b",
+    ]
+    NEG_PATTERNS = [
+        r"\bmro(ż|z)on\w*",                 # frozen
+        r"\bplastry\b",                    # sliced cold cuts
+        r"\bfilet\b.*\b\d{2,3}\s?g\b",     # fixed-weight packaged meats
+        r"\blisner\b|\bduda\b",            # packaged meat/salad brands
+        r"\bpedigree\b|\breno\b",          # pet food
+        r"\bduplo\b|\bsnickers\b",         # candy anchors
+        r"\bpies\b|\bps(ów|ow)\b|\bkot\b", # animal terms
+    ]
+
+    POS_RE = re.compile("|".join(POS_PATTERNS), re.IGNORECASE)
+    NEG_RE = re.compile("|".join(NEG_PATTERNS), re.IGNORECASE)
+
+    def rule_is_fc(product_line_norm: str) -> bool:
+        if not isinstance(product_line_norm, str):
+            return False
+        return bool(POS_RE.search(product_line_norm)) and not bool(NEG_RE.search(product_line_norm))
+
+    # --------- canonical prep ----------
     can = canonical_df.copy()
-    if not {"menu_item","menu_category"}.issubset(can.columns):
-        raise ValueError("Canonical must contain ['menu_item','menu_category']")
+    req_cols = {"menu_item", "menu_category"}
+    if not req_cols.issubset(can.columns):
+        raise ValueError(f"Canonical must contain {sorted(req_cols)}")
     can["menu_item_norm"] = normalize_text(can["menu_item"])
-    can["menu_category_norm"] = normalize_text(can["menu_category"])
-    # Broad bucket for subset matching
-    can["super_cat"] = can.apply(lambda r: infer_super_cat(f"{r['menu_category']} {r['menu_item']}"), axis=1)
+    # use a tiny list to speed up rapidfuzz calls
+    can_items = can["menu_item_norm"].tolist()
 
-    # Unique invoice products (+ optional product_line)
-    items = invoice_df[["product_name"]].dropna().drop_duplicates().copy()
-    items["product_norm"] = normalize_text(items["product_name"])
-    if "product_line" in invoice_df.columns:
-        pl = (invoice_df[["product_name","product_line"]]
-                .dropna()
-                .assign(product_line=lambda d: normalize_text(d["product_line"]))
-                .groupby("product_name")["product_line"]
-                .agg(lambda s: s.value_counts().index[0])
-                .reset_index())
-        items = items.merge(pl, on="product_name", how="left")
+    # --------- unique invoice items ----------
+    if key_col not in invoice_df.columns:
+        raise ValueError(f"key_col '{key_col}' not found in invoice_df columns")
+
+    items = (
+        invoice_df[[key_col]]
+        .dropna()
+        .drop_duplicates()
+        .rename(columns={key_col: "product_key_raw"})
+    )
+    items["product_norm"] = normalize_text(items["product_key_raw"])
+
+    # normalized product_line column for rule logic
+    if key_col == "product_line":
+        items["product_line"] = normalize_text(items["product_key_raw"])
     else:
-        items["product_line"] = pd.NA
+        # fallback: try to take a representative normalized product_line if present
+        if "product_line" in invoice_df.columns:
+            pl = (
+                invoice_df[[key_col, "product_line"]]
+                .dropna()
+                .assign(product_line=lambda d: d["product_line"].apply(normalize_text))
+                .groupby(key_col, as_index=False)["product_line"]
+                .agg(lambda s: s.value_counts().index[0])
+                .rename(columns={key_col: "product_key_raw"})
+            )
+            items = items.merge(pl, on="product_key_raw", how="left")
+        else:
+            items["product_line"] = pd.NA
 
+    # --------- per-item mapping ----------
     out = []
-    for _, row in items.iterrows():
-        raw = row["product_name"]
-        nm  = row["product_norm"]
-        pln = str(row.get("product_line") or "")
+    for _, r in items.iterrows():
+        raw = r["product_key_raw"]
+        nm  = r["product_norm"]
+        pln = r.get("product_line")
+        pln = pln if isinstance(pln, str) else ""
 
-        # 1) deny by frozen/packaged
-        if hits_any(NEG_FROZEN_PACK, nm):
-            out.append({**row, "best_match_item": None, "match_category": None, "score": 0, "is_food_corner_auto": False})
-            continue
+        # deterministic rule on product_line
+        rule_fc = rule_is_fc(pln)
 
-        # 2) obvious non-FC lines
-        if pln and hits_any(LINES_DENY, pln):
-            out.append({**row, "best_match_item": None, "match_category": None, "score": 0, "is_food_corner_auto": False})
-            continue
+        # fuzzy to all canonical items
+        best_item = None
+        match_cat = None
+        score = 0
+        if len(can_items) > 0:
+            match = process.extractOne(nm, can_items, scorer=fuzz.token_set_ratio)
+            if match:
+                score = int(match[1]) if match[1] is not None else 0
+                idx = int(match[2]) if match[2] is not None else -1
+                if 0 <= idx < len(can):
+                    best_item = can.iloc[idx]["menu_item"]
+                    match_cat = can.iloc[idx]["menu_category"]
 
-        # 3) choose category (line hint → name POS → infer from text)
-        cat = first_hit_category(pln, LINES_ALLOW) if pln else None
-        if not cat:
-            cat = first_hit_category(nm, POS)
-        if not cat:
-            cat = infer_super_cat(nm)
+        # category-aware / threshold decision
+        cat_fc = (match_cat in FC_CATEGORIES) and (score >= 60)
+        is_fc  = bool(rule_fc or cat_fc or (score >= threshold))
 
-        # coffee-specific brand negatives
-        if cat == "Kawa" and hits_any(NEG_COFFEE, nm):
-            cat = None
+        out.append({
+            "product_key_raw": raw,
+            "product_norm": nm,
+            "product_line": pln,
+            "best_match_item": best_item,
+            "match_category": match_cat,
+            "score": score,
+            "is_food_corner_auto": is_fc,
+        })
 
-        # weight/multipack: only exclude if no category was found
-        if not cat and is_weight_or_pack(nm):
-            out.append({**row, "best_match_item": None, "match_category": None, "score": 0, "is_food_corner_auto": False})
-            continue
-
-        if not cat:
-            out.append({**row, "best_match_item": None, "match_category": None, "score": 0, "is_food_corner_auto": False})
-            continue
-
-        # 4) fuzzy inside the super-category derived from canonical
-        subset = can[can["super_cat"] == cat]
-        if subset.empty:
-            out.append({**row, "best_match_item": None, "match_category": None, "score": 0, "is_food_corner_auto": False})
-            continue
-
-        subset_reset = subset.reset_index(drop=True)
-        match = process.extractOne(nm, subset_reset["menu_item_norm"], scorer=fuzz.token_set_ratio)
-        if not match:
-            out.append({**row, "best_match_item": None, "match_category": cat, "score": 0, "is_food_corner_auto": False})
-            continue
-
-        score = int(match[1])
-        best  = subset_reset.loc[match[2], "menu_item"]
-        is_fc = score >= threshold
-
-        out.append({**row, "best_match_item": best, "match_category": cat, "score": score, "is_food_corner_auto": is_fc})
-
-    out_df = pd.DataFrame(out)[["product_name","product_norm","product_line","best_match_item","match_category","score","is_food_corner_auto"]]
-    out_df.rename(columns={"product_name":"product_raw"}, inplace=True)
+    out_df = pd.DataFrame(out)[
+        ["product_key_raw","product_norm","product_line",
+         "best_match_item","match_category","score","is_food_corner_auto"]
+    ]
+    out_df.rename(columns={"product_key_raw": "product_raw"}, inplace=True)
     return out_df
+
