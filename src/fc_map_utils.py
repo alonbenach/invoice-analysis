@@ -67,13 +67,13 @@ _POS_PATTERNS = [
     r"\bkurczaker\b",   # FC box name seen in data
 ]
 _NEG_PATTERNS = [
-    r"\bmro(ż|z)on\w*",           # frozen
-    r"\bplastry\b",               # sliced cold cuts
-    r"\bfilet\b.*\b\d{2,3}\s?g\b",
-    r"\blisner\b|\bduda\b",       # packaged meat/salad brands
-    r"\bpedigree\b|\breno\b",     # pet food
-    r"\bduplo\b|\bsnickers\b",    # candy anchors
+    r"\bmro(ż|z)on\w*",             # frozen
+    r"\bplastry\b",                 # sliced cold cuts
+    r"\blisner\b|\bduda\b",         # packaged meat/salad brands
+    r"\bpedigree\b|\breno\b",       # pet food
+    r"\bduplo\b|\bsnickers\b",      # candy anchors
     r"\bpies\b|\bps(ów|ow)\b|\bkot\b"
+    r"\bkajzerka\b",                # bread roll
 ]
 
 _POS_RE = re.compile("|".join(_POS_PATTERNS), re.IGNORECASE)
@@ -100,7 +100,7 @@ POS = {
 }
 
 # Obvious non-FC product_line cues (deny)
-LINES_DENY = [r"\bnapoj\b", r"\bpiwo\b", r"\bpapieros", r"\blufka\b", r"\bbutelka\b"]
+LINES_DENY = [r"\bnapoj\b", r"\bpiwo\b", r"\bpapieros", r"\blufka\b", r"\bbutelka\b", r"\bkajzerka\b"]
 
 # product_line allow (mirror super-cats)
 LINES_ALLOW = {
@@ -166,13 +166,14 @@ def map_fc_products(
         r"\bkurczaker\b",
     ]
     NEG_PATTERNS = [
-        r"\bmro(ż|z)on\w*",                 # frozen
+        r"\bmro(ż|z)on\w*",                # frozen
         r"\bplastry\b",                    # sliced cold cuts
         r"\bfilet\b.*\b\d{2,3}\s?g\b",     # fixed-weight packaged meats
         r"\blisner\b|\bduda\b",            # packaged meat/salad brands
         r"\bpedigree\b|\breno\b",          # pet food
         r"\bduplo\b|\bsnickers\b",         # candy anchors
         r"\bpies\b|\bps(ów|ow)\b|\bkot\b", # animal terms
+        r"\bkajzerka\b",                   # bread roll
     ]
 
     POS_RE = re.compile("|".join(POS_PATTERNS), re.IGNORECASE)
@@ -250,6 +251,9 @@ def map_fc_products(
         cat_fc = (match_cat in FC_CATEGORIES) and (score >= 60)
         is_fc  = bool(rule_fc or cat_fc or (score >= threshold))
 
+        if nm.startswith("kajzerka ") or nm == "kajzerka":
+            is_fc = False
+
         out.append({
             "product_key_raw": raw,
             "product_norm": nm,
@@ -260,6 +264,7 @@ def map_fc_products(
             "is_food_corner_auto": is_fc,
         })
 
+
     out_df = pd.DataFrame(out)[
         ["product_key_raw","product_norm","product_line",
          "best_match_item","match_category","score","is_food_corner_auto"]
@@ -267,3 +272,47 @@ def map_fc_products(
     out_df.rename(columns={"product_key_raw": "product_raw"}, inplace=True)
     return out_df
 
+import re
+
+def fc_family_from_line(line: str) -> str:
+    if not isinstance(line, str):
+        return "Other FC"
+    s = line.upper()
+
+    # HOT DOGS
+    if re.search(r"HOT[\s\-]?DOG|HD\b", s):
+        return "Hot dog"
+
+    # FRIES
+    if re.search(r"FRYTK", s):
+        return "Fries & chicken"
+
+    # CHICKEN BOXES
+    if re.search(r"CHRUPBOX|STRIPS|NUGGET", s):
+        return "Fries & chicken"
+    
+    # BURGERS
+    if "BURGER" in s:
+        return "Burger"
+
+    # BAGIETKA 
+    if re.search(r"BAGIET|KANAPK", s):
+        return "Sandwich"
+    
+    # PIZZA
+    if re.search(r"PIZZA", s):
+        return "Pizza"
+    
+    # PINSA
+    if re.search(r"PINSA", s):
+        return "Pinsa"
+    
+    # SALADS
+    if re.search(r"SALATK|SALAD|SAŁATK", s):
+        return "Salad"
+    
+    # SOUPS
+    if re.search(r"ZUPA|SOUPE?", s):
+        return "Soup"
+
+    return "Other FC"

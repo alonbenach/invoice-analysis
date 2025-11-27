@@ -58,6 +58,15 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df.rename(columns={k: v for k, v in ALIASES.items() if k in df.columns}, inplace=True)
     return df
 
+# ---------- Clean non-product entries ----------
+NON_PRODUCTS = ["torba", "butelka", "opak", "kompania", "reklam", "kubek"]
+
+def is_non_product(name: str) -> bool:
+    if not isinstance(name, str):
+        return False
+    lower = name.lower()
+    return any(pat in lower for pat in NON_PRODUCTS)
+
 # ---------- Numeric casting ----------
 
 def _to_number_series(s: pd.Series) -> pd.Series:
@@ -202,3 +211,9 @@ def basic_checks(df: pd.DataFrame) -> dict:
             out[f"nulls_{c}"] = int(df[c].isna().sum())
     return out
 
+def clean_non_products(series , non_products) -> pd.Series:
+    clean_index = [
+        idx for idx in series.index
+        if not any(word in idx.lower() for word in NON_PRODUCTS)
+    ]
+    return series.loc[clean_index]
