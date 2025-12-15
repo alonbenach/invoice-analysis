@@ -1,0 +1,17 @@
+# Core
+pandas
+numpy
+
+# Database (NEON Postgres access)
+psycopg2-binary
+
+# Text normalization & fuzzy matching
+unidecode
+rapidfuzz
+
+# Plotting (static + exportable)
+matplotlib
+seaborn
+
+# Utilities
+python-dateutil
